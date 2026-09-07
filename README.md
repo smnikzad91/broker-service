@@ -1,5 +1,7 @@
 # mqttcloud broker service
 
+[![CI](https://github.com/smnikzad91/broker-service/actions/workflows/ci.yml/badge.svg)](https://github.com/smnikzad91/broker-service/actions/workflows/ci.yml)
+
 Standalone Aedes MQTT broker for mqttcloud.ir. It holds the long-lived TCP/TLS
 connections an MQTT broker needs — something a Next.js API route can't do —
 and talks to the **same MongoDB database** as the dashboard app
