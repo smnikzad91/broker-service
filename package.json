@@ -4,6 +4,7 @@
   "private": true,
   "description": "Standalone Aedes MQTT broker for mqttcloud.ir — authenticates against the MqttUser/MqttClient collections shared with the Next.js dashboard app and logs connection/publish activity back into the same MongoDB.",
   "main": "src/index.js",
+  "license": "MIT",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js"
