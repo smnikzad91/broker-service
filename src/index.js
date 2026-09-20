@@ -8,6 +8,7 @@ const mongoose = require("mongoose");
 const bcrypt   = require("bcryptjs");
 const Aedes    = require("aedes");
 const { Server: SocketIOServer } = require("socket.io");
+const websocketStream = require("websocket-stream");
 
 const { MqttUser, MqttClient, MqttActivity, MqttPayload } = require("./models");
 const { verifySocketToken } = require("./socketToken");
@@ -15,6 +16,7 @@ const { verifySocketToken } = require("./socketToken");
 const MONGODB_URI  = process.env.MONGODB_URI;
 const MQTT_PORT     = Number(process.env.MQTT_PORT ?? 1883);
 const MQTT_TLS_PORT = Number(process.env.MQTT_TLS_PORT ?? 8883);
+const MQTT_WS_PORT  = Number(process.env.MQTT_WS_PORT ?? 8884);
 const TLS_CERT_PATH = process.env.TLS_CERT_PATH ?? "";
 const TLS_KEY_PATH  = process.env.TLS_KEY_PATH ?? "";
 const SOCKET_PORT          = Number(process.env.SOCKET_PORT ?? 4021);
@@ -190,6 +192,13 @@ async function main() {
   } else {
     console.log("TLS_CERT_PATH/TLS_KEY_PATH not set (or unreadable) — running plaintext only.");
   }
+
+  // Browser clients (e.g. mqtt.js in the dashboard) can't open raw TCP
+  // sockets — they need MQTT-over-WebSocket. This listens in plaintext;
+  // nginx terminates TLS and proxies wss://mqtt.mqttcloud.ir/mqtt here.
+  const wsHttpServer = http.createServer();
+  websocketStream.createServer({ server: wsHttpServer }, aedes.handle);
+  wsHttpServer.listen(MQTT_WS_PORT, () => console.log(`MQTT broker (WebSocket) listening on port ${MQTT_WS_PORT}`));
 
   socketHttpServer.listen(SOCKET_PORT, () => console.log(`Socket.IO (live push) listening on port ${SOCKET_PORT}`));
 }
