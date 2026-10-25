@@ -55,11 +55,33 @@ io.on("connection", (socket) => {
   socket.join(`user:${socket.data.userId}`);
 });
 
+// Counts clients already registered on this broker process for a given
+// credential set, excluding `excludeClientId` — always the connecting
+// client's own id, so a reconnect under the same clientId never counts
+// against itself. Safe to call during authenticate(): aedes only adds a
+// client to `aedes.clients` (and kicks any same-id predecessor) in
+// registerClient(), which runs *after* authenticate() resolves — so a
+// genuine reconnect's old session is still keyed under the same clientId
+// at this point and gets excluded, never double-counted.
+function countLiveConnections(mqttUserId, excludeClientId) {
+  let count = 0;
+  for (const id in aedes.clients) {
+    if (id === excludeClientId) continue;
+    const c = aedes.clients[id];
+    if (c?.mqttUserId && String(c.mqttUserId) === String(mqttUserId)) count++;
+  }
+  return count;
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────
 // A device may only connect if:
-//   1. its username matches an active MqttUser credential set, and
+//   1. its username matches an active MqttUser credential set,
 //   2. its client id (client.id) matches an MqttClient pre-registered under
-//      that credential set from the dashboard.
+//      that credential set from the dashboard, and
+//   3. the credential set isn't already at its concurrent-connection limit
+//      (MqttUser.maxConnection — set from the account's plan when the
+//      credential was created; see assertCanCreateMqttUser on the
+//      dashboard side for the matching registration-time cap).
 // On success we stash the resolved ids on the `client` object — aedes gives
 // no other reliable way to recover them later in authorize*/lifecycle hooks.
 aedes.authenticate = async (client, username, password, callback) => {
@@ -75,6 +97,12 @@ aedes.authenticate = async (client, username, password, callback) => {
 
     const mqttClient = await MqttClient.findOne({ mqttUserId: mqttUser._id, clientName: client.id });
     if (!mqttClient) return callback(null, false);
+
+    const activeCount = countLiveConnections(mqttUser._id, client.id);
+    if (activeCount >= mqttUser.maxConnection) {
+      console.log(`[connection limit] ${uname}/${client.id} rejected — ${activeCount}/${mqttUser.maxConnection} already connected`);
+      return callback(null, false);
+    }
 
     client.username   = uname;
     client.userId     = mqttUser.userId;
