@@ -13,6 +13,9 @@ const MqttUserSchema = new Schema(
     password:      { type: String, required: true },
     isActive:      { type: Boolean, default: true },
     maxConnection: { type: Number, default: 3, min: 1 },
+    // Beyond the account's current plan (set by the dashboard's syncCredentialsToPlan):
+    // refused at connect and disconnected by the enforcement sweep.
+    planBlocked:   { type: Boolean, default: false },
   },
   { timestamps: true }
 );

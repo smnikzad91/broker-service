@@ -75,7 +75,8 @@ function countLiveConnections(mqttUserId, excludeClientId) {
 
 // ── Auth ──────────────────────────────────────────────────────────────────
 // A device may only connect if:
-//   1. its username matches an active MqttUser credential set,
+//   1. its username matches an active MqttUser credential set that isn't
+//      planBlocked (over the account's plan, e.g. after a paid plan expired),
 //   2. its client id (client.id) matches an MqttClient pre-registered under
 //      that credential set from the dashboard, and
 //   3. the credential set isn't already at its concurrent-connection limit
@@ -90,7 +91,7 @@ aedes.authenticate = async (client, username, password, callback) => {
     const uname = username.toString().toLowerCase();
 
     const mqttUser = await MqttUser.findOne({ username: uname });
-    if (!mqttUser || !mqttUser.isActive) return callback(null, false);
+    if (!mqttUser || !mqttUser.isActive || mqttUser.planBlocked) return callback(null, false);
 
     const match = await bcrypt.compare(password.toString(), mqttUser.password);
     if (!match) return callback(null, false);
@@ -107,6 +108,7 @@ aedes.authenticate = async (client, username, password, callback) => {
     client.username   = uname;
     client.userId     = mqttUser.userId;
     client.mqttUserId = mqttUser._id;
+    client.connectedAt = Date.now();
 
     callback(null, true);
   } catch (err) {
@@ -203,6 +205,65 @@ aedes.on("connectionError", (client, err) => {
   console.log(`[connection error] ${client?.id ?? "?"}:`, err.message);
 });
 
+// ── Live enforcement sweep ─────────────────────────────────────────────────
+// authenticate() only runs at connect time, so a change made afterwards on
+// the dashboard (a plan expiring to free, a credential suspended or deleted,
+// a device deleted) would otherwise leave existing sessions connected
+// indefinitely. Every ENFORCE_INTERVAL_MS this re-checks every live session
+// against the same rules and closes the ones that no longer pass. When a
+// credential set is over its maxConnection, the newest sessions go first.
+const ENFORCE_INTERVAL_MS = Number(process.env.ENFORCE_INTERVAL_MS ?? 30_000);
+
+async function enforceLimits() {
+  const byCred = new Map();
+  for (const id in aedes.clients) {
+    const c = aedes.clients[id];
+    if (!c?.mqttUserId) continue;
+    const key = String(c.mqttUserId);
+    if (!byCred.has(key)) byCred.set(key, []);
+    byCred.get(key).push(c);
+  }
+  if (byCred.size === 0) return;
+
+  const ids = [...byCred.keys()];
+  const [creds, devices] = await Promise.all([
+    MqttUser.find({ _id: { $in: ids } }).select("isActive planBlocked maxConnection").lean(),
+    MqttClient.find({ mqttUserId: { $in: ids } }).select("mqttUserId clientName").lean(),
+  ]);
+  const credById = new Map(creds.map((c) => [String(c._id), c]));
+  const registered = new Set(devices.map((d) => `${d.mqttUserId}:${d.clientName}`));
+
+  for (const [key, clients] of byCred) {
+    const cred = credById.get(key);
+    const reason = !cred ? "credential deleted" : !cred.isActive ? "credential suspended" : cred.planBlocked ? "over plan limit" : null;
+    const keep = [];
+    for (const c of clients) {
+      if (reason) kick(c, reason);
+      else if (!registered.has(`${key}:${c.id}`)) kick(c, "device deleted");
+      else keep.push(c);
+    }
+    if (reason) continue;
+    keep.sort((a, b) => (a.connectedAt ?? 0) - (b.connectedAt ?? 0));
+    for (const c of keep.slice(cred.maxConnection)) kick(c, `over ${cred.maxConnection} connections`);
+  }
+}
+
+function kick(client, reason) {
+  console.log(`[enforce] closing ${client.username}/${client.id} — ${reason}`);
+  client.close();
+}
+
+function startEnforcement() {
+  let running = false;
+  setInterval(async () => {
+    if (running) return;
+    running = true;
+    try { await enforceLimits(); }
+    catch (err) { console.error("enforcement sweep failed:", err); }
+    finally { running = false; }
+  }, ENFORCE_INTERVAL_MS).unref();
+}
+
 // ── Servers ───────────────────────────────────────────────────────────────
 async function main() {
   await mongoose.connect(MONGODB_URI);
@@ -227,6 +288,8 @@ async function main() {
   const wsHttpServer = http.createServer();
   websocketStream.createServer({ server: wsHttpServer }, aedes.handle);
   wsHttpServer.listen(MQTT_WS_PORT, () => console.log(`MQTT broker (WebSocket) listening on port ${MQTT_WS_PORT}`));
+
+  startEnforcement();
 
   socketHttpServer.listen(SOCKET_PORT, () => console.log(`Socket.IO (live push) listening on port ${SOCKET_PORT}`));
 }
