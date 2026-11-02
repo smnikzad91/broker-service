@@ -2,7 +2,9 @@
 // GET /api/user/mqtt/socket-token (see mqttcloud.ir/src/app/api/user/mqtt/socket-token/route.ts)
 // so a browser can join its own room on this broker's Socket.IO server without
 // either process needing to share session storage. Token shape:
-//   base64url(JSON.stringify({ uid, exp })) + "." + hmacSha256(payload)
+//   base64url(JSON.stringify({ uid, admin?, exp })) + "." + hmacSha256(payload)
+// Returns { uid, admin } or null. `admin` is only true when the dashboard
+// signed it for an admin session, so it can't be forged without the secret.
 const crypto = require("crypto");
 
 function verifySocketToken(token, secret) {
@@ -18,7 +20,7 @@ function verifySocketToken(token, secret) {
   try {
     const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
     if (!payload.uid || !payload.exp || payload.exp < Date.now()) return null;
-    return payload.uid;
+    return { uid: String(payload.uid), admin: payload.admin === true };
   } catch {
     return null;
   }

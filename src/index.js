@@ -45,15 +45,41 @@ const io = new SocketIOServer(socketHttpServer, {
 });
 
 io.use((socket, next) => {
-  const uid = verifySocketToken(socket.handshake.auth?.token, SOCKET_SHARED_SECRET);
-  if (!uid) return next(new Error("unauthorized"));
-  socket.data.userId = uid;
+  const claims = verifySocketToken(socket.handshake.auth?.token, SOCKET_SHARED_SECRET);
+  if (!claims) return next(new Error("unauthorized"));
+  socket.data.userId = claims.uid;
+  socket.data.admin = claims.admin;
   next();
 });
 
+// Admin sockets also join `admins` (every device connect/disconnect) and may
+// `watch` exact topics to receive each message published on them — used by
+// the dashboard's admin monitor pages (e.g. /admin/power).
 io.on("connection", (socket) => {
   socket.join(`user:${socket.data.userId}`);
+  if (!socket.data.admin) return;
+  socket.join("admins");
+  socket.on("watch", (topic) => {
+    if (typeof topic === "string" && topic.length <= 256 && !/[+#]/.test(topic)) socket.join(`topic:${topic}`);
+  });
+  socket.on("unwatch", (topic) => {
+    if (typeof topic === "string") socket.leave(`topic:${topic}`);
+  });
 });
+
+// Pushes a published message to admin sockets watching that exact topic.
+// Checks the room first so unwatched topics cost nothing.
+function pushWatchedMessage(client, packet) {
+  const room = `topic:${packet.topic}`;
+  if (!io.sockets.adapter.rooms.get(room)?.size) return;
+  io.to(room).emit("mqtt:message", {
+    topic:      packet.topic,
+    payload:    packet.payload.toString().slice(0, 4000),
+    username:   client.username,
+    clientName: client.id,
+    at:         new Date().toISOString(),
+  });
+}
 
 // Counts clients already registered on this broker process for a given
 // credential set, excluding `excludeClientId` — always the connecting
@@ -137,13 +163,15 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
 };
 
 // ── Connection lifecycle ─────────────────────────────────────────────────
-function pushActivity(userId, activity) {
-  io.to(`user:${userId}`).emit("mqtt:activity", {
+function pushActivity(userId, activity, username) {
+  const event = {
     id:         activity._id.toString(),
     clientName: activity.clientName,
     event:      activity.event,
     createdAt:  activity.createdAt,
-  });
+  };
+  io.to(`user:${userId}`).emit("mqtt:activity", event);
+  io.to("admins").emit("mqtt:client", { ...event, username });
 }
 
 aedes.on("client", async (client) => {
@@ -156,7 +184,7 @@ aedes.on("client", async (client) => {
     const activity = await MqttActivity.create({
       userId: client.userId, mqttUserId: client.mqttUserId, clientName: client.id, event: "connect",
     });
-    pushActivity(client.userId, activity);
+    pushActivity(client.userId, activity, client.username);
     console.log(`[connect] ${client.username}/${client.id}`);
   } catch (err) {
     console.error("client connect logging failed:", err);
@@ -173,7 +201,7 @@ aedes.on("clientDisconnect", async (client) => {
     const activity = await MqttActivity.create({
       userId: client.userId, mqttUserId: client.mqttUserId, clientName: client.id, event: "disconnect",
     });
-    pushActivity(client.userId, activity);
+    pushActivity(client.userId, activity, client.username);
     console.log(`[disconnect] ${client.username}/${client.id}`);
   } catch (err) {
     console.error("client disconnect logging failed:", err);
@@ -184,6 +212,7 @@ aedes.on("clientDisconnect", async (client) => {
 aedes.on("publish", async (packet, client) => {
   if (!client || !client.mqttUserId) return;
   if (packet.topic.startsWith("$SYS")) return;
+  pushWatchedMessage(client, packet);
   try {
     await MqttPayload.create({
       userId:     client.userId,
