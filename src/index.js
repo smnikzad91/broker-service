@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const fs       = require("fs");
+const { isUtf8 } = require("buffer");
 const http     = require("http");
 const net      = require("net");
 const tls      = require("tls");
@@ -220,6 +221,9 @@ aedes.on("publish", async (packet, client) => {
       clientName: client.id,
       topic:      packet.topic,
       payload:    packet.payload.toString().slice(0, 4000),
+      size:       packet.payload.length,
+      // Text would mangle non-UTF-8 bytes, so binary payloads keep their raw bytes too.
+      ...(isUtf8(packet.payload) ? {} : { raw: packet.payload.subarray(0, 4000) }),
     });
   } catch (err) {
     console.error("payload logging failed:", err);

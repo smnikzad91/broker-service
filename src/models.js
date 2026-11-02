@@ -50,6 +50,8 @@ const MqttPayloadSchema = new Schema(
     clientName: { type: String, required: true },
     topic:      { type: String, required: true },
     payload:    { type: String, default: "", maxlength: 4000 },
+    raw:        { type: Buffer },  // only for payloads that aren't valid UTF-8
+    size:       { type: Number },  // full payload length in bytes
     createdAt:  { type: Date, default: Date.now, expires: 60 * 60 * 24 * 7 },
   },
   { timestamps: false }
